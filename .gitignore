@@ -5,6 +5,6 @@
 .Renviron
 .env
 
-.html
-.csv
-.rda
+*.html
+*.csv
+*.rda

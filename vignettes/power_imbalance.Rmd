@@ -1,0 +1,288 @@
+---
+title: "Analysis of Power Imbalance"
+author: "Owen Daniel"
+date: "February 2020"
+output:
+  html_document:
+    theme: sandstone
+    toc: true
+    toc_float: true
+    fig_width: 10
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(knitr)
+library(kableExtra)
+library(here)
+```
+
+# Introduction
+This note explores differences in power output as measured by my indoor smart turbo trainer (Wahoo Kickr Core) and my crank based power meter (4iiii). Measurements have been taken by separately recording the data from the two sources during indoor training sessions.
+
+Observation shows that measurements from the 4iiii are consistently lower than those recorded by the Kickr; there are a number of different possible causes:
+
+* Genuine difference in calibration between the two devices, leading one to systemically record more/less accurately than the other.
+
+* Power imbalance between my legs, meaning that the 4iiii under reports as it is based on left leg output only.
+
+A third option, power loss through the drive chain, is not considered a contender as this would suggest that the 4iiii should read higher than the kickr.
+
+## Evidence for Leg Imbalance
+In December 2019, I undertook a (short!) pedalling analysis using a Shimano bike fitting machine, which separately records power output through the right and left leg.
+
+Over a 2 minute interval at 180W (~2.7W/Kg, ~70% FTP) and a cadence of 90RPM, on average I generated 56% of my power with the right leg. Equivalently, I averaged 100W with my right leg, vs 80W with my left leg.
+
+If this result is accurate, and consistent at various power outputs/cadences, then this would indicate that results from my 4iiii power meter will be under reporting my true power as it measures only power through the left crank arm.
+
+To obtain a total power estimate, the 4iiii doubles the output from the left leg. Applying this estimation methodology to the data obtained during the lab test, produces an average output of 160W (2 x 80W), under estimating the true average by 11%.
+
+## Data Collecton Methodology
+This analysis is conducted using data recorded during indoor training sesssions. Data for the 4iiii power meter is recorded using a Garmin head unit, along with the cadence (also measured by the 4iiii) and heart rate (measured from a smartwatch).
+
+Data from the Wahoo Kickr Core is recorded through Zwift; cadence and heart rate are also recorded, using the same sources as above. This means that the Wahoo results do still have a dependency on the 4iiii as the cadence source.
+
+Each ride is then saved as two separate `.fit` files (one for the 4iiii, and one for the Kickr), which in turn are converted to `.csv` files and merged to produce a single data set spanning both data sources, and multiple rides.
+
+These pre-processing steps are carried out in the file `./data/data_processed.R`.
+
+## Data
+The output of the pre-processing steps is a single data file with readings from both sources over multiple dates.
+
+```{r}
+library(tidyverse)
+library(zoo)
+
+dat <- read_rds(here("data/data-processed/data_processed.Rda"))
+```
+
+```{r, echo = FALSE}
+head(dat) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = "condensed", full_width = FALSE)
+```
+
+Central to our analysis will be the ratio of the two power sources, which we calculate below. We also average the cadence and heart rate recordings across the two sources to get single variables for these.
+
+```{r}
+dat <- dat %>%
+  mutate(
+    power_ratio = ifelse(power_4iiii == 0, NA, power_kickr / power_4iiii),
+    cadence = rowMeans(select(., starts_with("cadence")), na.rm = TRUE),
+    hr = rowMeans(select(., starts_with("hr")), na.rm = TRUE)
+  )
+```
+
+Power meters may require time to warm-up to give reliable readings, particularly the Kickr. For this reason we discard the first five minutes worth of data for each ride. We also remove data where the cadence or power values are outside of typical ranges.
+```{r}
+dat <- dat %>%
+
+  # Remove first five minutes from each file, to allow warm-up/calibration of power meters.
+  group_by(date) %>%
+  filter(date_time >= min(date_time) + 5 * 60) %>%
+  ungroup() %>%
+  
+  # Remove entries where either power source is NA, or is outside of 50 - 350W range.
+  filter_at(
+    vars(power_kickr, power_4iiii),
+    all_vars(!is.na(.) & between(. , 50,350))
+  ) %>%
+  
+  # Remove entries with invalid power ratio.
+  filter(
+    !is.na(power_ratio)
+  ) %>%
+  
+  # Remove data at extreme cadences, and where the cadence reported between the sources
+  # differs by more than 3RPM.
+  filter(
+    between(cadence,50,110),
+    abs(cadence_4iiii - cadence_kickr) <= 3
+  ) %>%
+
+  # Remove cadence/HR data from individual sources.
+  select_at(
+    vars(-cadence_4iiii, -cadence_kickr, - hr_4iiii, -hr_kickr)
+  )
+```
+
+```{r, echo = FALSE}
+head(dat) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = "condensed", full_width = FALSE)
+```
+
+## Summary of Power Imbalance
+
+The data confirms that the average power during a ride exceeds 1, with the average ratio observed per ride varying between 1.1 and 1.2. Since each sample typically consists of more than 3,000 data points (equivalent to 30 minutes of riding, recording data per second) the variation in the observed mean/median cannot be attributed to noise in the estimates alone.
+
+```{r, echo = FALSE, fig.width = 8}
+library(ggridges)
+ggplot(dat, aes(x = power_ratio, y = factor(date))) +
+  geom_density_ridges(quantile_lines = TRUE, quantiles = 2) +
+  scale_x_continuous(breaks = seq(0.9, 1.5,by=0.1)) +
+  coord_cartesian(xlim = c(0.9, 1.5)) +
+  xlab("Power Ratio") + ylab(" ") +
+  theme_minimal()
+```
+
+Plausible explanations for the observed differences include
+
+* Calibration differences in each of the power meters on different days; eg. due to temperature changes, tension of the crank arm (4iiii), or how recently a spin down has been performed (Kickr).
+
+* Physical differences such as fatigue which may affect one leg more/less than the other.
+
+* Differing amounts of time spent at specific power/cadence.
+
+The last point is based on a belief that the degree of leg imbalance likely depends on the cadence and power output at which I am riding. This is evidenced in the heat map below which shows power ratio as a function of power and cadence for a sample of rides.
+
+```{r, echo = FALSE}
+set.seed(101088)
+sample_dates <- dat %>% select(date) %>% unique %>% sample_n(6)
+
+# Reduce to sampled dates, and summarise power/cadence to nearest 5 Watts / RPM.
+heatmap_dat <- dat %>%
+  filter(date %in% sample_dates$date) %>%
+  mutate(
+    power_kickr = 35 * round(power_kickr/35, 0),
+    cadence     =  5 * round(cadence/5, 0)
+  )
+
+# Summarise for unique combinations of date/power/cadence.
+heatmap_dat <- heatmap_dat %>%
+  group_by(date, cadence, power_kickr) %>%
+  summarise(
+    n = n(),
+    power_ratio = mean(power_ratio)
+  ) %>% ungroup()
+
+# Remove cases where fewer than 10 seconds were spent at that
+#  cadence/power on a given ride.
+heatmap_dat <- heatmap_dat %>% filter(n >= 10)
+
+library(wesanderson)
+pal <- wes_palette("Zissou", 100, type = "continuous")
+
+ggplot(heatmap_dat) +
+  geom_tile(
+    aes(x = cadence, y = power_kickr, fill = power_ratio)
+  ) +
+  scale_fill_gradientn(colours = pal) + 
+  theme_minimal() +
+  facet_wrap(facets = vars(date), nrow = 2, ncol = 3)
+```
+
+
+# Modelling
+
+In this section we present a number of models for the relationship between the two power sources.
+
+Rather than directly predicting the power from the Kickr as the dependent variable, we will instead treat the power ratio as the dependent variable. In the simple case of fitting this model as a constant ($y \sim 1$), this is equivalent to assuming $P_K \sim \alpha \, P_I$, a linear model with no intercept.
+
+## Baselining Predictive Performance
+
+Before analysing any models, we first identify a baseline for prediction accuracy. For this we will establish the residual variance that remains when fitting a model which we cannot expect to out perform. The model we choose is the 5-second rolling mean of the power ratio.
+
+```{r}
+dat <- dat %>%
+  group_by(date) %>%
+  mutate(
+    power_ratio_5 = rollmean(power_ratio, k = 5, fill = NA, align = "center")
+  )
+```
+
+The rolling mean does not represent a realistic model that we can use to infer information about the power ratio, as it depends on knowing the value of the ratio to derive its estimate.
+
+It is however useful as a bench mark as we cannot reasonably expect any models we fit to out perform it at predicting the power ratio. The plot below shows that there is a high level of variation between seconds which is not captured by the rolling mean, and which we therefore cannot expect any model to capture.
+
+```{r, echo = FALSE}
+ggplot(dat %>% filter(date == max(dat$date)), aes(date_time, power_ratio)) +
+  geom_line(color = "hotpink", alpha = 0.5) +
+  geom_line(aes(date_time, power_ratio_5)) +
+  theme_minimal()
+```
+
+We will use the coefficient of determination ($R^2$) to evaluate the quality of model fits, and baseline this against 
+
+```{r}
+dat %>% group_by(date) %>%
+  filter(!is.na(power_ratio_5)) %>%
+  summarise(
+    mean_power_ratio = mean(power_ratio),
+    tss = sum( (power_ratio - mean_power_ratio)^2 ),
+    ssr = sum( (power_ratio - power_ratio_5)^2 ),
+    r2 = 1 - ssr/tss
+  ) %>%
+  select(-tss, -ssr) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = "condensed", full_width = FALSE)
+```
+
+## Data Preparation
+```{r}
+# Add square terms for each of power, cadence and HR.
+dat <- dat %>%
+  mutate_at(
+    vars(power_4iiii, cadence, hr),
+    .funs = list(sq = ~(.)^2)
+  )
+    
+set.seed(101088)
+
+trn_dates <- dat %>% select(date) %>% unique() %>% sample_frac(size = 0.75)
+
+trn <- dat %>% semi_join(trn_dates)
+tst <- dat %>% anti_join(trn_dates)
+```
+
+```{r}
+library(tidymodels)
+
+# Apply scaling.
+rcp <- recipe(
+    power_ratio ~ ., 
+    # power_ratio ~ date + power_4iiii + power_4iiii_sq + cadence,
+    data = trn %>% select_at(vars(power_ratio, date, contains("4iiii"), contains("cadence"), contains("hr")))
+  ) %>%
+  step_scale(contains("4iiii"), contains("cadence"), contains("hr")) %>%
+  step_center(contains("4iiii"), contains("cadence"), contains("hr"))
+  # step_scale(power_4iiii, power_4iiii_sq, cadence) %>%
+  # step_center(power_4iiii, power_4iiii_sq, cadence)
+
+prep_rcp <- prep(rcp, training = trn, strings_as_factors = FALSE)
+
+trn_bk <- bake(prep_rcp, trn)
+tst_bk <- bake(prep_rcp, tst)
+```
+
+## Bayesian Hierarchical Model
+
+```{r}
+knit_exit()
+```
+
+```{r}
+library(rstanarm)
+
+trn_bk <- trn_bk %>% sample_frac(0.2)
+
+stan_fiter <- stan_glmer(
+  formula = power_ratio ~ 1 + power_4iiii + power_4iiii_sq +  cadence + cadence_sq + hr + hr_sq + (1 | date),
+  #formula = power_ratio ~ 1 + power_4iiii + power_4iiii_sq +  cadence + (1 | date),
+  data = trn_bk,
+  family = gaussian(),
+  prior_intercept = normal(1.1, 0.05, autoscale = FALSE),
+  prior = normal(0, 0.025, autoscale = FALSE),
+  prior_aux = exponential(rate = (1/0.1), autoscale = FALSE),
+  prior_covariance = decov(scale = 0.25),
+  cores = 4,
+  chains = 4,
+  iter =2000
+)
+
+
+pp_plot <- posterior_vs_prior(stan_fiter)
+pp_plot + coord_cartesian(ylim = c(-0.1, 0.25)) +
+  scale_y_continuous(breaks = seq(-0.1, 0.25, by = 0.02), labels = scales::percent_format(accuracy =1))
+```
